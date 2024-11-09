@@ -1,0 +1,226 @@
+import telebot
+from telebot import types
+import datetime
+import json
+import locale
+import time
+import threading
+import random
+import schedule
+
+# Locale ayarı
+try:
+    locale.setlocale(locale.LC_ALL, 'tr_TR.UTF-8')
+except locale.Error:
+    print("Turkish locale not available, using default.")
+
+# Bot configuration
+TOKEN = '7325699470:AAEvHcYFqpxk34d4lspofDHkfoPUZgxoV48'
+bot = telebot.TeleBot(TOKEN)
+
+# Global variables
+user_states = {}
+tasks = {}
+
+# Constants
+CATEGORIES = {
+    '⭕️ Hatırlatma': 'reminder',
+    '📋 Proje': 'project',
+    '🔧 Tadilat': 'renovation',
+    '⭐ Diğer': 'other'
+}
+
+MOTIVATIONAL_MESSAGES = [
+    "🌟 Bugün harika işler başaracaksın!",
+    "💪 Her görev, başarıya giden yolda bir adımdır!",
+    "🎯 Hedeflerine odaklan ve başaracaksın!",
+    "⭐ Sen yapabilirsin, kendine güven!",
+    "🌈 Zorluklar seni daha güçlü yapacak!",
+    "🚀 Küçük adımlar, büyük başarıların temelidir!",
+]
+
+FUNNY_MESSAGES = [
+    "🎭 Hey! Görevlerini check etmeyi unutma, yoksa üzülürüm! 😢",
+    "🎪 Görevler seni bekliyor, kaçış yok! 😅",
+    "🎨 Bugün süper kahraman gibisin, görevlerin senden korkuyor! 💪",
+    "🎮 Görevleri tamamlamak bir oyun gibi, ve sen en iyi oyuncusun! 🏆",
+    "🎯 Görevler liste yapıyor: 'En sevdiğimiz insan geliyor!' 😄",
+]
+
+# Helper functions
+def save_tasks():
+    with open('tasks.json', 'w', encoding='utf-8') as f:
+        json.dump(tasks, f, ensure_ascii=False)
+
+def load_tasks():
+    try:
+        with open('tasks.json', 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return {}
+
+tasks = load_tasks()
+
+def is_valid_date(year, month, day):
+    try:
+        datetime.datetime(year, month, day)
+        return True
+    except ValueError:
+        return False
+
+def adjust_date(year, month, day):
+    while month > 12:
+        year += 1
+        month -= 12
+    while month < 1:
+        year -= 1
+        month += 12
+    
+    while not is_valid_date(year, month, day):
+        day -= 1
+    return year, month, day
+
+def create_picker(selected_date=None, picker_type='date', hour=None, minute=None):
+    markup = types.InlineKeyboardMarkup(row_width=3)
+    
+    if picker_type == 'date':
+        if selected_date is None:
+            selected_date = datetime.datetime.now()
+        year, month, day = selected_date.year, selected_date.month, selected_date.day
+        
+        day_row = [
+            types.InlineKeyboardButton("◀️", callback_data=f"day_prev_{day}_{month}_{year}"),
+            types.InlineKeyboardButton(f"{day:02d}", callback_data="ignore"),
+            types.InlineKeyboardButton("▶️", callback_data=f"day_next_{day}_{month}_{year}")
+        ]
+        markup.row(*day_row)
+
+        month_row = [
+            types.InlineKeyboardButton("◀️", callback_data=f"month_prev_{day}_{month}_{year}"),
+            types.InlineKeyboardButton(f"{month:02d}", callback_data="ignore"),
+            types.InlineKeyboardButton("▶️", callback_data=f"month_next_{day}_{month}_{year}")
+        ]
+        markup.row(*month_row)
+
+        year_row = [
+            types.InlineKeyboardButton("◀️", callback_data=f"year_prev_{day}_{month}_{year}"),
+            types.InlineKeyboardButton(f"{year}", callback_data="ignore"),
+            types.InlineKeyboardButton("▶️", callback_data=f"year_next_{day}_{month}_{year}")
+        ]
+        markup.row(*year_row)
+        
+        markup.row(types.InlineKeyboardButton("İleri ➡️", callback_data=f"date_confirm_{day}_{month}_{year}"))
+    elif picker_type == 'time':
+        if hour is None:
+            hour = datetime.datetime.now().hour
+        if minute is None:
+            minute = (datetime.datetime.now().minute // 15) * 15
+        
+        hour_row = [
+            types.InlineKeyboardButton("◀️", callback_data=f"hour_prev_{hour:02d}_{minute:02d}"),
+            types.InlineKeyboardButton(f"{hour:02d}", callback_data="ignore"),
+            types.InlineKeyboardButton("▶️", callback_data=f"hour_next_{hour:02d}_{minute:02d}")
+        ]
+        markup.row(*hour_row)
+        
+        minute_row = [
+            types.InlineKeyboardButton("◀️", callback_data=f"minute_prev_{minute:02d}_{hour:02d}"),
+            types.InlineKeyboardButton(f"{minute:02d}", callback_data="ignore"),
+            types.InlineKeyboardButton("▶️", callback_data=f"minute_next_{minute:02d}_{hour:02d}")
+        ]
+        markup.row(*minute_row)
+        
+        markup.row(types.InlineKeyboardButton("✅ Onayla", callback_data=f"time_confirm_{hour:02d}_{minute:02d}"))
+    
+    return markup
+# Bot command handlers
+@bot.message_handler(commands=['start'])
+def start(message):
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+    buttons = [
+        types.KeyboardButton('➕ Görev Ekle'),
+        types.KeyboardButton('📋 Görevlerim'),
+        types.KeyboardButton('✅ Tamamlandı'),
+        types.KeyboardButton('🗑 Görev Sil'),
+        types.KeyboardButton('📊 Rapor')
+    ]
+    markup.add(*buttons)
+    bot.send_message(
+        message.chat.id,
+        "👋 Hoş geldiniz! Görev yönetimi botuna hoş geldiniz.\n"
+        "Ne yapmak istersiniz?",
+        reply_markup=markup
+    )
+
+def show_tasks_markup(message, action, button_callback):
+    user_id = str(message.from_user.id)
+    if user_id not in tasks or not tasks[user_id]:
+        bot.reply_to(message, f"{action.capitalize()} bulunmuyor!")
+        return
+
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    for i, task in enumerate(tasks[user_id]):
+        markup.add(types.InlineKeyboardButton(task['name'], callback_data=f"{button_callback}_{i}"))
+    
+    bot.send_message(message.chat.id, f"{action} olarak işaretlemek istediğiniz görevi seçin:", reply_markup=markup)
+
+@bot.message_handler(func=lambda message: message.text == '📋 Görevlerim')
+def show_tasks(message):
+    user_id = str(message.from_user.id)
+    if user_id not in tasks or not tasks[user_id]:
+        bot.reply_to(message, "Henüz görev eklenmemiş!")
+        return
+
+    response = "📋 Görevleriniz:\n\n"
+    for task in tasks[user_id]:
+        category_name = next(k for k, v in CATEGORIES.items() if v == task['category'])
+        reminder = f"\n⏰ Hatırlatma: {task['reminder']}" if task['reminder'] else ""
+        response += f"• {task['name']} ({category_name}){reminder}\n\n"
+    
+    bot.reply_to(message, response)
+
+@bot.message_handler(func=lambda message: message.text == '➕ Görev Ekle')
+def add_task(message):
+    user_id = str(message.from_user.id)
+    user_states[user_id] = {'step': 'waiting_task_name'}
+    bot.send_message(message.chat.id, "📝 Görev adını yazın:")
+
+@bot.message_handler(func=lambda message: message.text == '✅ Tamamlandı')
+def mark_completed(message):
+    show_tasks_markup(message, "Tamamlanacak görev", "complete")
+
+@bot.message_handler(func=lambda message: message.text == '🗑 Görev Sil')
+def delete_task(message):
+    show_tasks_markup(message, "Silinecek görev", "delete")
+
+@bot.message_handler(func=lambda message: user_states.get(str(message.from_user.id), {}).get('step') == 'waiting_task_name')
+def get_task_name(message):
+    user_id = str(message.from_user.id)
+    user_states[user_id].update({
+        'step': 'waiting_category',
+        'task_name': message.text
+    })
+    
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    for category_name, category_value in CATEGORIES.items():
+        markup.add(types.InlineKeyboardButton(category_name, callback_data=f"category_{category_value}"))
+    
+    bot.send_message(
+        message.chat.id,
+        "📁 Görev kategorisini seçin:",
+        reply_markup=markup
+    )
+
+# Diğer gerekli işleyiciler ve fonksiyonlar buraya eklenecek
+
+def run_bot():
+    try:
+        print("Bot başlatılıyor...")
+        bot.polling(none_stop=True)
+    except Exception as e:
+        print(f"Hata oluştu: {e}")
+        time.sleep(15)
+        run_bot()
+
+if __name__ == "__main__":
+    run_bot()
